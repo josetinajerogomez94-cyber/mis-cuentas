@@ -51,7 +51,7 @@ header.top{display:flex;align-items:center;justify-content:space-between;gap:12p
 .month{display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px}
 .month button{border:0;background:none;width:30px;height:30px;border-radius:50%;cursor:pointer;color:var(--muted);font-size:18px;line-height:1}
 .month button:hover{background:var(--surface-2)}
-.month span{min-width:84px;text-align:center;font-weight:600;font-size:14px;white-space:nowrap}
+.month span{min-width:84px;text-align:center;font-weight:600;font-size:13px;white-space:nowrap}
 .iconbtn{border:1px solid var(--line);background:var(--surface);width:36px;height:36px;border-radius:50%;cursor:pointer;color:var(--muted);display:grid;place-items:center}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
@@ -150,6 +150,8 @@ nav.tabs .add svg{width:26px;height:26px}
 .actions{display:flex;gap:8px;justify-content:space-between;margin-top:6px;flex-wrap:wrap}
 .actions .r{display:flex;gap:8px;margin-left:auto}
 .toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:30;max-width:calc(100% - 32px)}
+.nomina-btn{margin-top:14px;width:100%;background:var(--accent-ink);color:var(--accent)}
+.month button:disabled{opacity:.3;cursor:default}
 .sync{font-size:12px;color:var(--faint);text-align:center;margin-top:8px}
 
 html{-webkit-text-size-adjust:100%}
@@ -227,7 +229,7 @@ const KEYWORDS = {
 const ABBR = c => ({Supermercado:"SUP",Restaurantes:"RES",Transporte:"TRA",Gasolina:"GAS",Compras:"COM",Ocio:"OCI",Salud:"SAL",Hogar:"HOG",Suscripciones:"SUS",Seguros:"SEG","Préstamos":"PRE","Autónomo":"AUT",Otros:"OTR"}[c]||"·");
 
 /* ---------- estado ---------- */
-const state = { mode:"loading", config:null, fijos:{}, gastos:{}, ahorros:{}, tab:"resumen", month: todayISO().slice(0,7) };
+const state = { mode:"loading", config:null, fijos:{}, gastos:{}, ahorros:{}, nominas:{}, tab:"resumen", pidx:null };
 try { const t = localStorage.getItem("mc.tab"); if (t) state.tab = t; } catch(e){}
 
 /* Datos de ejemplo (no son tuyos) */
@@ -250,6 +252,7 @@ function demoData(){
       f4:{nombre:"Cuota de autónomo",importe:87.61,dia:30,categoria:"Autónomo",frecuencia:"mensual"}
     },
     gastos:g,
+    nominas:{n1:{fecha:addMonths(cur,-3)+"-28",importe:1850},n2:{fecha:prev2+"-28",importe:1850},n3:{fecha:prev+"-28",importe:1850}},
     ahorros:{
       a1:{nombre:"Cuenta remunerada Revolut", objetivo:10000, historial:[
         {fecha:addMonths(cur,-5)+"-28",saldo:4200},{fecha:addMonths(cur,-4)+"-28",saldo:4650},{fecha:addMonths(cur,-3)+"-28",saldo:5180},
@@ -261,65 +264,88 @@ function demoData(){
 /* ---------- almacenamiento: db (si está disponible) o este navegador ---------- */
 let store = null; // {set(col,id,data), del(col,id), setConfig(data)}
 const LS = "mc.data.v1";
+const snapshot = () => ({config:state.config,fijos:state.fijos,gastos:state.gastos,ahorros:state.ahorros,nominas:state.nominas});
 function localStore(){
-  const save = () => { try { localStorage.setItem(LS, JSON.stringify({config:state.config,fijos:state.fijos,gastos:state.gastos,ahorros:state.ahorros})); } catch(e){} };
+  const save = () => { try { localStorage.setItem(LS, JSON.stringify(snapshot())); } catch(e){} };
   return {
     kind:"local",
     async set(col,id,data){ state[col] = {...state[col],[id]:data}; save(); render(); },
     async del(col,id){ const c={...state[col]}; delete c[id]; state[col]=c; save(); render(); },
     async setConfig(data){ state.config = data; save(); render(); },
-    async wipe(){ state.fijos={}; state.gastos={}; state.ahorros={}; save(); }
+    async wipe(){ state.fijos={}; state.gastos={}; state.ahorros={}; state.nominas={}; save(); },
+    async setMany(col,items){ state[col]={...state[col],...items}; save(); render(); }
   };
 }
 function loadLocal(){
-  try { const raw = localStorage.getItem(LS); if (raw){ const d=JSON.parse(raw); Object.assign(state,{config:d.config,fijos:d.fijos||{},gastos:d.gastos||{},ahorros:d.ahorros||{}}); return true; } } catch(e){}
+  try { const raw = localStorage.getItem(LS); if (raw){ const d=JSON.parse(raw); Object.assign(state,{config:d.config,fijos:d.fijos||{},gastos:d.gastos||{},ahorros:d.ahorros||{},nominas:d.nominas||{}}); return true; } } catch(e){}
   return false;
 }
 
 async function boot(){
+  try{ navigator.storage?.persist?.(); }catch(e){}
+  store = localStore();
+  state.mode = loadLocal() && state.config ? "real" : "demo";
+  $("#syncNote").textContent = state.mode==="real" ? "Guardado en este iPhone · haz una copia de vez en cuando en Ajustes" : "";
   render();
-  let db=null, uid=null;
-  try {
-    db = null; try{ navigator.storage?.persist?.(); }catch(e){}
-    const user = db ? await window.claude.use("user") : null;
-    uid = user ? await user.id() : null;
-  } catch(e){ db=null; }
-  if (db && uid){
-    const base = db.doc("data/users/"+uid+"/cuentas");
-    const cols = {fijos:base.collection("fijos"), gastos:base.collection("gastos"), ahorros:base.collection("ahorros")};
-    store = {
-      kind:"db",
-      async set(col,id,data){ await cols[col].doc(id).set(data); },
-      async del(col,id){ await cols[col].doc(id).delete(); },
-      async setConfig(data){ await base.set(data); },
-      async wipe(){ for (const col of Object.keys(cols)) for (const id of Object.keys(state[col])) await cols[col].doc(id).delete(); }
-    };
-    let gotConfig=false;
-    const timer = setTimeout(()=>{ if(!gotConfig){ $("#syncNote").textContent="No se pueden cargar tus datos todavía. Reintentando…"; } }, 10000);
-    const fail = e => { $("#syncNote").textContent = "No se pudo sincronizar ("+(e?.code||"error")+")."; };
-    base.onSnapshot(s => {
-      if (!s.metadata.fromCache){ gotConfig=true; clearTimeout(timer); $("#syncNote").textContent="Guardado en tu cuenta de Claude · privado"; }
-      state.config = s.exists ? s.data() : null;
-      if (!s.exists && !s.metadata.fromCache) state.mode="demo"; else if (s.exists) state.mode="real";
-      render();
-    }, fail);
-    for (const [k,ref] of Object.entries(cols)){
-      ref.onSnapshot(qs => { const o={}; qs.docs.forEach(d=>o[d.id]=d.data()); state[k]=o; render(); }, fail);
-    }
-  } else {
-    store = localStore();
-    state.mode = loadLocal() && state.config ? "real" : "demo";
-    $("#syncNote").textContent = state.mode==="real" ? "Guardado en este iPhone · haz una copia de vez en cuando en Ajustes" : "";
-    render();
-  }
+  syncSheet(true);
+  document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") syncSheet(true); });
+}
+
+/* ---------- pagos desde Google Sheets ---------- */
+let syncing=false;
+async function syncSheet(silent){
+  const c = state.config||{}; const sh = c.sheet;
+  if (state.mode!=="real" || !sh || !sh.url || !sh.token || syncing) return;
+  syncing=true;
+  try{
+    const u = sh.url + (sh.url.includes("?")?"&":"?") + "t="+encodeURIComponent(sh.token) + "&desde="+(sh.desde||2);
+    const res = await fetch(u, {cache:"no-store"});
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error==="clave"?"La clave no coincide con la del script":"Respuesta no válida");
+    const items = {}; let n=0;
+    parseLines((j.filas||[]).map(f=>f.linea).join("\n")).forEach(x=>{ if(!state.gastos[x.key] && !items[x.key]){ const {key,...rec}=x; items[key]=rec; n++; } });
+    if (n) await store.setMany("gastos", items);
+    await store.setConfig({...state.config, sheet:{...sh, desde:j.siguiente||sh.desde||2, ultima:new Date().toISOString()}});
+    $("#syncNote").textContent = "Pagos de Apple Pay al día" + (n?` · ${n} nuevo${n>1?"s":""}`:"");
+    if (n || !silent) toast(n? `${n} pago${n>1?"s":""} nuevo${n>1?"s":""} de Apple Pay` : "No hay pagos nuevos");
+  }catch(e){
+    $("#syncNote").textContent = "No se pudieron traer los pagos de Google Sheets";
+    if (!silent) toast("No se pudieron traer los pagos: "+(e.message||"sin conexión"));
+  }finally{ syncing=false; }
 }
 
 /* vista efectiva: demo o datos reales */
 function data(){
-  if (state.mode==="real") return {config:state.config||{}, fijos:state.fijos, gastos:state.gastos, ahorros:state.ahorros};
+  if (state.mode==="real") return {config:state.config||{}, fijos:state.fijos, gastos:state.gastos, ahorros:state.ahorros, nominas:state.nominas||{}};
   return demoData();
 }
 const readOnly = () => state.mode!=="real";
+
+/* ---------- periodos: de nómina a nómina ---------- */
+const addDaysISO = (iso,n) => { const [y,m,d]=iso.split("-").map(Number); return new Date(Date.UTC(y,m-1,d+n)).toISOString().slice(0,10); };
+const lastDay = k => new Date(Number(k.slice(0,4)), Number(k.slice(5,7)), 0).getDate();
+const addMonthsISO = (iso,n) => { const k=addMonths(iso.slice(0,7),n); return k+"-"+String(Math.min(Number(iso.slice(8,10)), lastDay(k))).padStart(2,"0"); };
+const dShort = iso => { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString("es-ES",{day:"numeric",month:"short"}).replace(".",""); };
+function nominasOrd(d){ return Object.entries(d.nominas||{}).map(([id,n])=>({id,...n})).sort((a,b)=>a.fecha<b.fecha?-1:a.fecha>b.fecha?1:0); }
+/* Lista de periodos. Con nóminas: cada nómina abre uno. Sin nóminas: meses de calendario. */
+function periodos(d){
+  const ns = nominasOrd(d);
+  if (ns.length){
+    return ns.map((n,i)=>{
+      const sig = ns[i+1];
+      return { key:n.id, inicio:n.fecha, fin: sig? sig.fecha : addMonthsISO(n.fecha,1), abierto:!sig, ingresos:+n.importe||0, nominaId:n.id,
+        label: sig ? `${dShort(n.fecha)} – ${dShort(addDaysISO(sig.fecha,-1))}` : `Desde ${dShort(n.fecha)}`, corto: dShort(n.fecha) };
+    });
+  }
+  const cur = todayISO().slice(0,7), out=[];
+  for (let i=-11;i<=0;i++){ const k=addMonths(cur,i); const s=new Date(Number(k.slice(0,4)),Number(k.slice(5,7))-1,1).toLocaleDateString("es-ES",{month:"short"}).replace(".",""); out.push({key:k, inicio:k+"-01", fin:addMonths(k,1)+"-01", abierto:i===0, ingresos:+d.config.nomina||0, label:s.charAt(0).toUpperCase()+s.slice(1)+" "+k.slice(0,4), corto:s, mensual:true}); }
+  return out;
+}
+function periodoActual(d){
+  const ps = periodos(d);
+  if (state.pidx==null || state.pidx>=ps.length || state.pidx<0) state.pidx = ps.length-1;
+  return {ps, i:state.pidx, p:ps[state.pidx]};
+}
 
 /* ---------- cálculos ---------- */
 function fijoEnMes(f, m){
@@ -331,15 +357,24 @@ function fijoEnMes(f, m){
   }
   return {};
 }
-function resumenMes(d, m){
-  const fijos = Object.entries(d.fijos).map(([id,f])=>({id,...f,en:fijoEnMes(f,m)})).filter(f=>f.en);
-  const gastos = Object.entries(d.gastos).map(([id,g])=>({id,...g})).filter(g=>ym(g.fecha)===m);
+function resumenPeriodo(d, p){
+  const hoy = todayISO();
+  const fijos = [];
+  const m0 = ym(p.inicio), m1 = ym(p.fin);
+  for (let k=m0; k<=m1; k=addMonths(k,1)){
+    Object.entries(d.fijos).forEach(([id,f])=>{
+      const fc = k+"-"+String(Math.min(+f.dia||1, lastDay(k))).padStart(2,"0");
+      if (fc>=p.inicio && fc<p.fin){ const en=fijoEnMes(f,k); if(en) fijos.push({id,...f,en,fechaCargo:fc,pendiente:fc>hoy}); }
+    });
+  }
+  const gastos = Object.entries(d.gastos).map(([id,g])=>({id,...g})).filter(g=>g.fecha>=p.inicio && g.fecha<p.fin);
   const tf = fijos.reduce((a,f)=>a+(+f.importe||0),0);
+  const tfPend = fijos.filter(f=>f.pendiente).reduce((a,f)=>a+(+f.importe||0),0);
   const tv = gastos.reduce((a,g)=>a+(+g.importe||0),0);
   const porCat = {};
   fijos.forEach(f=>porCat[f.categoria||"Otros"]=(porCat[f.categoria||"Otros"]||0)+(+f.importe||0));
   gastos.forEach(g=>porCat[g.categoria||"Otros"]=(porCat[g.categoria||"Otros"]||0)+(+g.importe||0));
-  return {fijos,gastos,tf,tv,total:tf+tv,porCat,ingresos:+d.config.nomina||0};
+  return {fijos,gastos,tf,tfPend,tv,total:tf+tv,porCat,ingresos:p.ingresos,resultado:p.ingresos-(tf+tv)};
 }
 function categorize(comercio, d){
   const n = norm(comercio);
@@ -352,125 +387,141 @@ function saldoActual(a){ const h=(a.historial||[]).slice().sort((x,y)=>x.fecha<y
 
 /* ---------- render ---------- */
 function render(){
-  { const [yy,mm]=state.month.split("-").map(Number); const s=new Date(yy,mm-1,1).toLocaleDateString("es-ES",{month:"short"}).replace(".",""); $("#monthLbl").textContent = s.charAt(0).toUpperCase()+s.slice(1)+" "+yy; }
   $("#demoBanner").hidden = state.mode!=="demo";
   document.querySelectorAll("nav.tabs [data-tab]").forEach(b=>b.setAttribute("aria-current", b.dataset.tab===state.tab?"page":"false"));
   const v = $("#view");
   if (state.mode==="loading"){ v.innerHTML = `<div class="card empty">Cargando tus cuentas…</div>`; return; }
   const d = data();
+  const {ps,i,p} = periodoActual(d);
+  $("#monthLbl").textContent = p.label;
+  $("#prevM").disabled = i<=0; $("#nextM").disabled = i>=ps.length-1;
   v.innerHTML = ({resumen:viewResumen, gastos:viewGastos, fijos:viewFijos, ahorro:viewAhorro, atajo:viewAtajo}[state.tab]||viewResumen)(d);
   bindView();
 }
 
 function viewResumen(d){
-  const r = resumenMes(d, state.month);
-  const prev = resumenMes(d, addMonths(state.month,-1));
-  const queda = r.ingresos - r.total;
+  const {ps,i,p} = periodoActual(d);
+  const r = resumenPeriodo(d, p);
+  const prevP = i>0 ? ps[i-1] : null;
+  const prev = prevP ? resumenPeriodo(d, prevP) : null;
   const pf = r.ingresos? Math.min(100, r.tf/r.ingresos*100):0, pv = r.ingresos? Math.min(100-pf, r.tv/r.ingresos*100):0;
-  const cats = Object.entries(r.porCat).sort((a,b)=>b[1]-a[1]);
+  const cats = Object.entries(r.porCat).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
   const max = cats.length? cats[0][1]:1;
-  // insights
   const ins = [];
-  const prevCat = prev.porCat;
-  cats.slice(0,6).forEach(([c,v])=>{
-    const p = prevCat[c]||0; if (p>20){ const dlt=(v-p)/p*100; if (Math.abs(dlt)>=20) ins.push(dlt>0?`<li><span class="pill up">+${Math.round(dlt)}%</span><span>${esc(c)}: ${fmt(v)} este mes frente a ${fmt(p)} el mes pasado.</span></li>`:`<li><span class="pill down">${Math.round(dlt)}%</span><span>${esc(c)}: has gastado ${fmt(p-v)} menos que el mes pasado.</span></li>`); }
+  if (prev) cats.slice(0,6).forEach(([c,v])=>{
+    const q = prev.porCat[c]||0; if (q>20){ const dlt=(v-q)/q*100; if (Math.abs(dlt)>=20) ins.push(dlt>0?`<li><span class="pill up">+${Math.round(dlt)}%</span><span>${esc(c)}: ${fmt(v)} este periodo frente a ${fmt(q)} el anterior.</span></li>`:`<li><span class="pill down">${Math.round(dlt)}%</span><span>${esc(c)}: has gastado ${fmt(q-v)} menos que el periodo anterior.</span></li>`); }
   });
+  if (p.abierto && r.tfPend>0){ const pend=r.fijos.filter(f=>f.pendiente); ins.unshift(`<li><span class="pill info">Pendiente</span><span>Faltan por cobrarte ${fmt(r.tfPend)} de fijos (${pend.map(f=>esc(f.nombre)).join(", ")}). Ya están descontados de lo que te queda.</span></li>`); }
   const anuales = Object.values(d.fijos).filter(f=>f.frecuencia==="anual");
   if (anuales.length){ const res = anuales.reduce((a,f)=>a+(+f.importe||0),0)/12; ins.push(`<li><span class="pill info">Anual</span><span>Aparta ${fmt(res)} al mes para pagos anuales (${anuales.map(f=>esc(f.nombre)).join(", ")}).</span></li>`); }
   const sinImporte = Object.values(d.fijos).filter(f=>!(+f.importe));
   if (sinImporte.length) ins.push(`<li><span class="pill warn">Falta</span><span>Pon el importe de: ${sinImporte.map(f=>esc(f.nombre)).join(", ")}.</span></li>`);
-  const subs = r.fijos.filter(f=>f.categoria==="Suscripciones").reduce((a,f)=>a+(+f.importe||0),0);
-  if (subs) ins.push(`<li><span class="pill info">Subs</span><span>Tus suscripciones suman ${fmt(subs)} al mes (${fmt(subs*12)} al año).</span></li>`);
-  // ahorro
   const totalAhorro = Object.values(d.ahorros).reduce((a,x)=>a+saldoActual(x),0);
+  const neg = r.resultado<0;
+  const titulo = p.abierto ? (neg?"Te has pasado":"Te queda hasta la próxima nómina") : (neg?"Déficit de este periodo":"Ahorraste en este periodo");
+  const sinNomina = !nominasOrd(d).length;
+  const sub = sinNomina
+    ? (r.ingresos? `de ${fmt(r.ingresos)} de nómina · mes de calendario` : "Registra tu nómina para empezar a contar")
+    : `de ${fmt(r.ingresos)} cobrados el ${dShort(p.inicio)}${r.ingresos?` · has gastado el ${Math.round(r.total/r.ingresos*100)}%`:""}`;
   return `
   <section class="card hero">
-    <div class="label">Te queda este mes</div>
-    <div class="big num">${fmt(queda)}</div>
-    <div class="sub">${r.ingresos? `de ${fmt(r.ingresos)} de nómina · has gastado el ${Math.round(r.total/r.ingresos*100)}%` : "Añade tu nómina en Ajustes"}</div>
+    <div class="label">${titulo}</div>
+    <div class="big num">${neg?"−":""}${fmt(Math.abs(r.resultado))}</div>
+    <div class="sub">${sub}</div>
     <div class="meter" aria-hidden="true"><i style="width:${pf}%"></i><i class="v" style="width:${pv}%"></i></div>
     <div class="flow">
       <div><b class="num">${fmt0(r.tf)}</b><span>Fijos</span></div>
       <div><b class="num">${fmt0(r.tv)}</b><span>Día a día</span></div>
       <div><b class="num">${fmt0(totalAhorro)}</b><span>Ahorrado</span></div>
     </div>
+    <button class="btn nomina-btn" id="nominaBtn">He cobrado la nómina</button>
   </section>
 
   <section class="card">
     <h2>¿En qué se va?<small>${fmt(r.total)} en total</small></h2>
-    ${cats.length? `<div class="cats">${cats.map(([c,v])=>`<div class="cat"><span class="n">${esc(c)}</span><span class="v num"><span class="pct">${Math.round(v/r.total*100)}%</span>${fmt(v)}</span><div class="bar"><i style="width:${Math.max(2,v/max*100)}%"></i></div></div>`).join("")}</div>` : `<div class="empty">Sin gastos este mes todavía.</div>`}
+    ${cats.length? `<div class="cats">${cats.map(([c,v])=>`<div class="cat"><span class="n">${esc(c)}</span><span class="v num"><span class="pct">${Math.round(v/r.total*100)}%</span>${fmt(v)}</span><div class="bar"><i style="width:${Math.max(2,v/max*100)}%"></i></div></div>`).join("")}</div>` : `<div class="empty">Sin gastos en este periodo todavía.</div>`}
   </section>
 
   ${ins.length? `<section class="card"><h2>Lo que deberías saber</h2><ul class="insights">${ins.join("")}</ul></section>`:""}
 
   <section class="card">
-    <h2>Últimos 6 meses</h2>
-    <div class="legend"><span><i style="background:var(--s1)"></i>Fijos</span><span><i style="background:var(--s2)"></i>Día a día</span></div>
+    <h2>Mes a mes<small>${sinNomina?"meses de calendario":"de nómina a nómina"}</small></h2>
     ${histChart(d)}
   </section>`;
 }
 
 function histChart(d){
-  const ms = [...Array(6)].map((_,i)=>addMonths(state.month,i-5));
-  const rows = ms.map(m=>{ const r=resumenMes(d,m); return {m,f:r.tf,v:r.tv}; });
-  const W=320,H=150,pl=36,pb=20,pt=8, iw=W-pl-6, ih=H-pb-pt;
-  const mx = Math.max(100,...rows.map(r=>r.f+r.v));
-  const step = mx>2000?500:mx>800?200:mx>300?100:50;
-  const top = Math.ceil(mx/step)*step;
-  const y = v => pt+ih-(v/top*ih);
+  const {ps,i} = periodoActual(d);
+  const desde = Math.max(0, i-5);
+  const rows = ps.slice(desde, i+1).map((p,j)=>{ const r=resumenPeriodo(d,p); return {p, idx:desde+j, r}; });
+  const W=320,H=170,pl=40,pt=10,pb=22, iw=W-pl-6, ih=H-pt-pb;
+  const vals = rows.map(x=>x.r.resultado);
+  const mx = Math.max(100, ...vals.map(Math.abs));
+  const step = mx>2000?1000:mx>800?250:mx>300?100:50;
+  const top = Math.ceil(Math.max(0,...vals,0)/step)*step || step;
+  const bot = Math.floor(Math.min(0,...vals)/step)*step;
+  const rng = top-bot;
+  const y = v => pt + (top-v)/rng*ih;
   const bw = iw/rows.length*0.56;
-  let g = "";
-  for (let t=0;t<=top;t+=step){ g+=`<line x1="${pl}" x2="${W-6}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" stroke-width="1"/><text x="${pl-6}" y="${y(t)+3.5}" text-anchor="end" font-size="9.5" fill="var(--faint)">${t>=1000?(t/1000)+"k":t}</text>`; }
-  rows.forEach((r,i)=>{
-    const cx = pl + iw/rows.length*(i+.5), x = cx-bw/2;
-    const hf = r.f/top*ih, hv = r.v/top*ih;
-    const cur = r.m===state.month;
-    if (hf>0) g+=`<rect x="${x}" y="${y(r.f)}" width="${bw}" height="${hf}" fill="var(--s1)" ${hv>0?"":'rx="3"'}/>`;
-    if (hv>2) g+=`<rect x="${x}" y="${y(r.f+r.v)}" width="${bw}" height="${hv-2}" rx="3" fill="var(--s2)"/>`;
-    g+=`<text x="${cx}" y="${H-5}" text-anchor="middle" font-size="10" fill="${cur?"var(--ink)":"var(--muted)"}" font-weight="${cur?600:400}">${monthShort(r.m)}</text>`;
-    g+=`<rect x="${cx-iw/rows.length/2}" y="${pt}" width="${iw/rows.length}" height="${ih}" fill="transparent" data-tip="${esc(monthName(r.m))}|${fmt(r.f)}|${fmt(r.v)}|${fmt(r.f+r.v)}"/>`;
+  let g="";
+  for (let t=bot;t<=top;t+=step){ g+=`<line x1="${pl}" x2="${W-6}" y1="${y(t)}" y2="${y(t)}" stroke="${t===0?"var(--muted)":"var(--line)"}" stroke-width="1"/><text x="${pl-6}" y="${y(t)+3.5}" text-anchor="end" font-size="9.5" fill="var(--faint)">${Math.abs(t)>=1000?(t/1000)+"k":t}</text>`; }
+  rows.forEach((x,j)=>{
+    const cx = pl + iw/rows.length*(j+.5), bx=cx-bw/2, v=x.r.resultado;
+    const y0=y(0), y1=y(v), h=Math.max(1,Math.abs(y1-y0));
+    if (v>=0) g+=`<path d="M${bx},${y0} V${y1+3} q0,-3 3,-3 H${bx+bw-3} q3,0 3,3 V${y0} Z" fill="var(--good)"/>`;
+    else g+=`<path d="M${bx},${y0} V${y1-3} q0,3 3,3 H${bx+bw-3} q3,0 3,-3 V${y0} Z" fill="var(--bad)"/>`;
+    const cur = x.idx===i;
+    g+=`<text x="${cx}" y="${H-6}" text-anchor="middle" font-size="10" fill="${cur?"var(--ink)":"var(--muted)"}" font-weight="${cur?600:400}">${esc(x.p.corto)}</text>`;
+    g+=`<rect x="${cx-iw/rows.length/2}" y="${pt}" width="${iw/rows.length}" height="${ih}" fill="transparent" data-tip="${esc(x.p.label)}|${fmt(x.r.ingresos)}|${fmt(x.r.total)}|${(v<0?"−":"+")+fmt(Math.abs(v))}" data-pidx="${x.idx}" style="cursor:pointer"/>`;
   });
-  return `<div class="hist"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Gasto de los últimos 6 meses">${g}</svg><div class="tip" hidden></div></div>`;
+  const lista = rows.slice().reverse().map(x=>{ const v=x.r.resultado; return `<button class="row" data-pidx="${x.idx}"><span class="ico">${v>=0?"+":"−"}</span><span class="t"><b>${esc(x.p.label)}${x.p.abierto?" · en curso":""}</b><span>Entró ${fmt0(x.r.ingresos)} · gastaste ${fmt0(x.r.total)}</span></span><span class="a num">${v>=0?`<span class="pill down">Ahorro</span>`:`<span class="pill up">Déficit</span>`}<small>${(v<0?"−":"+")+fmt(Math.abs(v))}</small></span></button>`; }).join("");
+  return `<div class="hist"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Ahorro o déficit por periodo">${g}</svg><div class="tip" hidden></div></div><div class="list" style="margin-top:8px">${lista}</div>`;
 }
 
 function viewGastos(d){
-  const r = resumenMes(d, state.month);
+  const {p} = periodoActual(d);
+  const r = resumenPeriodo(d, p);
   const gs = r.gastos.sort((a,b)=>a.fecha<b.fecha?1:-1);
-  let html = "", lastDay="";
+  let html = "", lastDayLbl="";
   gs.forEach(g=>{
-    if (g.fecha!==lastDay){ lastDay=g.fecha; const [y,m,dd]=g.fecha.split("-").map(Number); html+=`<div class="day">${new Date(y,m-1,dd).toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"short"})}</div>`; }
-    html+=`<button class="row" data-edit-gasto="${esc(g.id)}"><span class="ico">${ABBR(g.categoria)}</span><span class="t"><b>${esc(g.comercio||"Sin nombre")}</b><span>${esc(g.categoria)}${g.origen==="atajo"?" · desde el atajo":""}</span></span><span class="a num">−${fmt(g.importe)}</span></button>`;
+    if (g.fecha!==lastDayLbl){ lastDayLbl=g.fecha; const [y,m,dd]=g.fecha.split("-").map(Number); html+=`<div class="day">${new Date(y,m-1,dd).toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"short"})}</div>`; }
+    html+=`<button class="row" data-edit-gasto="${esc(g.id)}"><span class="ico">${ABBR(g.categoria)}</span><span class="t"><b>${esc(g.comercio||"Sin nombre")}</b><span>${esc(g.categoria)}${g.origen==="atajo"?" · Apple Pay":""}</span></span><span class="a num">−${fmt(g.importe)}</span></button>`;
   });
+  const sheetOn = !!(d.config.sheet&&d.config.sheet.url);
   return `
   <section class="card">
     <h2>Gastos del día a día<small>${fmt(r.tv)}</small></h2>
-    <div class="actions" style="margin:0 0 6px"><button class="btn ghost small" id="importBtn">Importar del atajo</button><button class="btn ghost small" data-goto="atajo">Cómo crear el atajo</button></div>
-    <div class="list">${html || `<div class="empty">Aún no hay gastos en ${esc(monthName(state.month))}. Pulsa + para añadir uno o importa los del atajo.</div>`}</div>
+    <div class="actions" style="margin:0 0 6px">${sheetOn?`<button class="btn ghost small" id="syncBtn">Actualizar pagos</button>`:""}<button class="btn ghost small" id="importBtn">Importar archivo</button><button class="btn ghost small" data-goto="atajo">Cómo crear el atajo</button></div>
+    <div class="list">${html || `<div class="empty">Aún no hay gastos en este periodo (${esc(p.label)}). Pulsa + para añadir uno.</div>`}</div>
   </section>`;
 }
 
 function viewFijos(d){
-  const m = state.month;
-  const fs = Object.entries(d.fijos).map(([id,f])=>({id,...f,en:fijoEnMes(f,m)})).sort((a,b)=>(a.dia||0)-(b.dia||0));
-  const total = fs.filter(f=>f.en).reduce((a,f)=>a+(+f.importe||0),0);
+  const {p} = periodoActual(d);
+  const r = resumenPeriodo(d, p);
+  const enP = {}; r.fijos.forEach(f=>enP[f.id]=f);
+  const fs = Object.entries(d.fijos).map(([id,f])=>({id,...f,cargo:enP[id]})).sort((a,b)=>(a.dia||0)-(b.dia||0));
+  const ref = enP && p.inicio;
   const row = f => {
     let sub = `Día ${f.dia||"?"} · ${esc(f.categoria)}`;
     let extra = "";
     if (f.frecuencia==="anual") sub += ` · anual, en ${new Date(2000,(f.mesAnual||1)-1,1).toLocaleDateString("es-ES",{month:"long"})}`;
     if (f.cuotas && f.inicio){
-      const hechas = Math.max(0, Math.min(f.cuotas, monthsBetween(f.inicio, m)+1));
+      const mref = f.cargo ? ym(f.cargo.fechaCargo) : ym(p.inicio);
+      const hechas = Math.max(0, Math.min(f.cuotas, monthsBetween(f.inicio, mref)+1));
       const quedan = f.cuotas-hechas;
       sub += quedan>0 ? ` · quedan ${quedan} cuotas (${fmt(quedan*f.importe)})` : " · terminado";
       extra = `<div class="prog"><i style="width:${hechas/f.cuotas*100}%"></i></div>`;
     }
     const amt = +f.importe ? `−${fmt(f.importe)}` : `<span class="pill warn">Pon importe</span>`;
-    return `<button class="row" data-edit-fijo="${esc(f.id)}" style="${f.en?"":"opacity:.55"}"><span class="ico">${ABBR(f.categoria)}</span><span class="t"><b>${esc(f.nombre)}</b><span>${sub}</span>${extra}</span><span class="a num">${amt}${f.en?"":"<small>no toca este mes</small>"}</span></button>`;
+    const estado = f.cargo ? (f.cargo.pendiente?`<small>se cobra el ${dShort(f.cargo.fechaCargo)}</small>`:`<small>cobrado el ${dShort(f.cargo.fechaCargo)}</small>`) : "<small>no toca en este periodo</small>";
+    return `<button class="row" data-edit-fijo="${esc(f.id)}" style="${f.cargo?"":"opacity:.55"}"><span class="ico">${ABBR(f.categoria)}</span><span class="t"><b>${esc(f.nombre)}</b><span>${sub}</span>${extra}</span><span class="a num">${amt}${estado}</span></button>`;
   };
   return `
   <section class="card">
     <h2>Gastos fijos<small>salen de tu cuenta de la nómina</small></h2>
     <div class="list">${fs.map(row).join("") || `<div class="empty">Añade tus gastos fijos: Spotify, seguro, plazos…</div>`}</div>
-    <div class="totrow"><span>Total en ${esc(monthName(m))}</span><span class="num">${fmt(total)}</span></div>
+    <div class="totrow"><span>Total en este periodo</span><span class="num">${fmt(r.tf)}</span></div>
   </section>
   <button class="btn" id="addFijo">Añadir gasto fijo</button>`;
 }
@@ -517,7 +568,8 @@ function viewAtajo(){
       <li>Añade la acción <b>Formatear fecha</b> con <i>Fecha actual</i> y formato <b>ISO 8601</b>.</li>
       <li>Añade <b>Texto</b> con: <span class="mono">Fecha formateada|Importe|Comercio</span> (inserta las tres variables, separadas por <span class="mono">|</span>).</li>
       <li>Añade <b>Añadir al archivo de texto</b>: archivo <span class="mono">Atajos/gastos.txt</span> en iCloud Drive, activando <b>Crear nueva línea</b>.</li>
-      <li>Cuando quieras, en <b>Gastos → Importar del atajo</b>, elige ese archivo. Los pagos ya importados no se duplican.</li>
+      <li>Para que los pagos lleguen solos: añade <b>Obtener contenido de URL</b> con la dirección de tu script de Google, método <b>POST</b>, cuerpo <b>Formulario</b> y dos campos: <span class="mono">t</span> (tu clave) y <span class="mono">linea</span> (la variable Texto). Pon esa dirección y la clave en Ajustes.</li>
+      <li>Sin Google, en <b>Gastos → Importar archivo</b> eliges ese archivo. Los pagos ya importados no se duplican.</li>
     </ol>
     <p class="note">Cada línea quedará así: <span class="mono">2026-11-20T13:42:10+01:00|12,50 €|Mercadona</span></p>
   </section>
@@ -538,6 +590,9 @@ function bindView(){
   $("#addFijo") && ($("#addFijo").onclick=()=>sheetFijo());
   $("#addAhorro") && ($("#addAhorro").onclick=()=>sheetAhorro());
   $("#importBtn") && ($("#importBtn").onclick=()=>sheetImport());
+  $("#syncBtn") && ($("#syncBtn").onclick=()=>syncSheet(false));
+  $("#nominaBtn") && ($("#nominaBtn").onclick=()=>sheetNomina());
+  document.querySelectorAll(".list [data-pidx]").forEach(b=>b.onclick=()=>{ state.pidx=+b.dataset.pidx; render(); window.scrollTo(0,0); });
   const hist = document.querySelector(".hist");
   if (hist){
     const tip = hist.querySelector(".tip");
@@ -550,13 +605,13 @@ function bindView(){
 }
 function go(tab){ state.tab=tab; try{localStorage.setItem("mc.tab",tab)}catch(e){} render(); window.scrollTo(0,0); }
 document.querySelectorAll("nav.tabs [data-tab]").forEach(b=>b.onclick=()=>go(b.dataset.tab));
-$("#prevM").onclick=()=>{state.month=addMonths(state.month,-1);render();};
-$("#nextM").onclick=()=>{state.month=addMonths(state.month,1);render();};
+$("#prevM").onclick=()=>{ if(state.pidx>0){state.pidx--;render();} };
+$("#nextM").onclick=()=>{ state.pidx++; render(); };
 $("#addBtn").onclick=()=>sheetGasto();
 $("#openSettings").onclick=()=>sheetSettings();
 $("#startReal").onclick=startReal;
 
-function toast(msg){ const t=document.createElement("div"); t.className="toast"; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2600); }
+function toast(msg){ document.querySelectorAll(".toast").forEach(x=>x.remove()); const t=document.createElement("div"); t.className="toast"; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2600); }
 function needReal(){ if (readOnly()){ toast("Pulsa «Empezar con mis datos» para guardar tus cambios"); return true; } return false; }
 
 async function startReal(){
@@ -575,8 +630,8 @@ async function startReal(){
     for (const f of base) await store.set("fijos", newId(), f);
     await store.set("ahorros", newId(), {nombre:"Cuenta remunerada Revolut", objetivo:0, historial:[]});
     if (store.kind==="local"){ state.mode="real"; $("#syncNote").textContent="Guardado en este iPhone · haz una copia de vez en cuando en Ajustes"; }
-    state.tab="fijos"; render();
-    toast("Listo. Pon el importe de cada gasto fijo y tu nómina en Ajustes.");
+    state.tab="fijos"; state.pidx=null; render();
+    toast("Listo. Pon el importe de cada gasto fijo y registra tu nómina en Resumen.");
   }catch(e){ toast("No se pudo empezar: "+(e?.code||e?.message||"error")); btn.disabled=false; btn.textContent="Empezar con mis datos"; }
 }
 
@@ -728,24 +783,52 @@ function sheetImport(){
     });
 }
 
+function sheetNomina(id){
+  const d=data(); const ns=nominasOrd(d); const last=ns[ns.length-1];
+  const n = id ? d.nominas[id] : {fecha:todayISO(), importe: last? last.importe : (+d.config.nomina||"")};
+  openSheet(`<h3>${id?"Editar nómina":"He cobrado la nómina"}</h3>
+    <form id="fN">
+      <div class="f"><label for="nImp">Importe neto (€)</label><input id="nImp" class="amount-in num" inputmode="decimal" placeholder="0,00" value="${n.importe!==""?String(n.importe).replace(".",","):""}" required></div>
+      <div class="f"><label for="nFec">Fecha de cobro</label><input id="nFec" type="date" value="${esc(n.fecha)}" required></div>
+      <p class="note">Desde esta fecha empieza un periodo nuevo y los gastos vuelven a cero. El periodo anterior queda guardado en «Mes a mes» con su ahorro o déficit.</p>
+      ${!id&&ns.length?`<p class="note">Nóminas registradas: ${ns.slice(-4).reverse().map(x=>`<a href="#" data-edit-nom="${esc(x.id)}">${dShort(x.fecha)} (${fmt0(x.importe)})</a>`).join(" · ")}</p>`:""}
+      <div class="actions">${id?`<button type="button" class="btn danger" id="nDel">Borrar</button>`:""}<div class="r"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn">Guardar</button></div></div>
+    </form>`, wrap=>{
+      wrap.querySelectorAll("[data-edit-nom]").forEach(a=>a.onclick=e=>{ e.preventDefault(); sheetNomina(a.dataset.editNom); });
+      wrap.querySelector("#fN").onsubmit=async e=>{ e.preventDefault(); if(needReal())return;
+        const imp=parseAmount(wrap.querySelector("#nImp").value); if(!(imp>0)){ toast("Escribe el importe de la nómina"); return; }
+        const fecha=wrap.querySelector("#nFec").value;
+        if (!id && Object.values(d.nominas||{}).some(x=>x.fecha===fecha)){ toast("Ya hay una nómina en esa fecha. Tócala en la lista para editarla."); return; }
+        closeSheet(); await store.set("nominas", id||newId(), {fecha, importe:imp}); state.pidx=null; render();
+        toast(id?"Nómina actualizada":"Nómina registrada. Empieza un periodo nuevo.");
+      };
+      const del=wrap.querySelector("#nDel"); del && (del.onclick=async()=>{ if(needReal())return; closeSheet(); await store.del("nominas",id); state.pidx=null; render(); toast("Nómina borrada"); });
+    });
+}
+
 function sheetSettings(){
   const c=data().config;
   openSheet(`<h3>Ajustes</h3>
     <form id="fC">
-      <div class="f"><label for="cNom">Nómina neta al mes (€)</label><input id="cNom" class="num" inputmode="decimal" value="${+c.nomina?String(c.nomina).replace(".",","):""}" placeholder="0,00"></div>
-      <p class="note">Lo que cobras como autónomo va a tu cuenta de ahorro, así que no lo pongas aquí: se ve en Ahorro cuando actualizas el saldo.</p>
+      <div class="label">Pagos automáticos (Google Sheets)</div>
+      <div class="f" style="margin-top:8px"><label for="cUrl">Dirección del script (termina en /exec)</label><input id="cUrl" type="url" autocomplete="off" value="${esc(c.sheet?.url||"")}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+      <div class="f"><label for="cTok">Clave</label><input id="cTok" autocomplete="off" value="${esc(c.sheet?.token||"")}" placeholder="La misma que pusiste en el script"></div>
+      <p class="note">${c.sheet?.ultima?`Última actualización: ${new Date(c.sheet.ultima).toLocaleString("es-ES",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}.`:"Con esto, los pagos de Apple Pay aparecen solos al abrir la app."}</p>
       <div class="actions"><button type="button" class="btn ghost small" data-goto-atajo style="margin-right:auto">Cómo crear el atajo</button><div class="r"><button type="button" class="btn ghost" data-close>Cerrar</button><button class="btn">Guardar</button></div></div>
     </form>
     <div class="bk"><div class="label" style="width:100%">Copia de seguridad</div>
       <button type="button" class="btn ghost small" id="bkOut">Descargar copia</button>
       <label class="btn ghost small" for="bkIn" style="display:inline-block">Restaurar copia</label><input id="bkIn" type="file" accept=".json,application/json" hidden>
       <p class="note" style="width:100%;margin:4px 0 0">Tus datos viven solo en este iPhone. Guarda la copia en iCloud Drive para no perderlos si borras la app o cambias de móvil.</p></div>`, wrap=>{
-      wrap.querySelector("#bkOut").onclick=()=>{ if(needReal())return; const blob=new Blob([JSON.stringify({app:"mis-cuentas",v:1,fecha:todayISO(),config:state.config,fijos:state.fijos,gastos:state.gastos,ahorros:state.ahorros},null,1)],{type:"application/json"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="mis-cuentas-"+todayISO()+".json"; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000); };
-      wrap.querySelector("#bkIn").onchange=e=>{ const f=e.target.files[0]; if(!f)return; const r=new FileReader(); r.onload=()=>{ try{ const d=JSON.parse(r.result); if(d.app!=="mis-cuentas") throw 0; Object.assign(state,{config:d.config||{},fijos:d.fijos||{},gastos:d.gastos||{},ahorros:d.ahorros||{},mode:"real"}); localStorage.setItem("mc.data.v1",JSON.stringify({config:state.config,fijos:state.fijos,gastos:state.gastos,ahorros:state.ahorros})); closeSheet(); render(); toast("Copia restaurada"); }catch(err){ toast("Ese archivo no es una copia de Mis Cuentas"); } }; r.readAsText(f); };
+      wrap.querySelector("#bkOut").onclick=()=>{ if(needReal())return; const blob=new Blob([JSON.stringify({app:"mis-cuentas",v:2,fecha:todayISO(),...snapshot()},null,1)],{type:"application/json"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="mis-cuentas-"+todayISO()+".json"; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000); };
+      wrap.querySelector("#bkIn").onchange=e=>{ const f=e.target.files[0]; if(!f)return; const r=new FileReader(); r.onload=()=>{ try{ const d=JSON.parse(r.result); if(d.app!=="mis-cuentas") throw 0; Object.assign(state,{config:d.config||{},fijos:d.fijos||{},gastos:d.gastos||{},ahorros:d.ahorros||{},nominas:d.nominas||{},mode:"real",pidx:null}); localStorage.setItem("mc.data.v1",JSON.stringify(snapshot())); closeSheet(); render(); toast("Copia restaurada"); }catch(err){ toast("Ese archivo no es una copia de Mis Cuentas"); } }; r.readAsText(f); };
       wrap.querySelector("[data-goto-atajo]").onclick=()=>{closeSheet();go("atajo");};
       wrap.querySelector("#fC").onsubmit=async e=>{ e.preventDefault(); if(needReal())return;
-        const n=parseAmount(wrap.querySelector("#cNom").value||"0");
-        closeSheet(); await store.setConfig({...(state.config||{}), nomina:isFinite(n)?n:0}); toast("Ajustes guardados");
+        const url=wrap.querySelector("#cUrl").value.trim(), tok=wrap.querySelector("#cTok").value.trim();
+        const prev=(state.config||{}).sheet||{};
+        const sheet = url&&tok ? {...prev, url, token:tok, desde: (prev.url===url?prev.desde:2)} : null;
+        closeSheet(); await store.setConfig({...(state.config||{}), sheet}); toast("Ajustes guardados");
+        if (sheet) syncSheet(false);
       };
     });
 }
